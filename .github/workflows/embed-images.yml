@@ -1,0 +1,87 @@
+name: Embed Images into HTML
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  embed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python deps
+        run: pip install requests
+
+      - name: Download and embed all images
+        run: |
+          python3 << 'PYEOF'
+          import requests, base64, re, time, hashlib
+
+          with open('index.html', 'r', encoding='utf-8') as f:
+              html = f.read()
+
+          # Find the photos map
+          start = html.find("const photos = {")
+          depth = 0
+          i = start + len("const photos = ")
+          while i < len(html):
+              if html[i] == '{': depth += 1
+              elif html[i] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      end = i + 1
+                      break
+              i += 1
+
+          map_str = html[start:end]
+          pairs = re.findall(r"'([^']+)':\s*'(https://[^']+)'", map_str)
+          print(f"Found {len(pairs)} images to embed")
+
+          ok, fail = 0, 0
+          for key, url in pairs:
+              # Skip if already base64
+              if url.startswith('data:'):
+                  print(f"  - skip (already embedded): {key[:40]}")
+                  ok += 1
+                  continue
+              try:
+                  r = requests.get(url, timeout=20, headers={
+                      'User-Agent': 'Mozilla/5.0 (compatible; HardkillDB/1.0)'
+                  })
+                  if r.status_code == 200 and len(r.content) > 500:
+                      ext = url.split('.')[-1].lower().split('?')[0]
+                      mime = {
+                          'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+                          'png': 'image/png', 'gif': 'image/gif',
+                          'svg': 'image/svg+xml', 'webp': 'image/webp'
+                      }.get(ext, 'image/jpeg')
+                      b64 = base64.b64encode(r.content).decode()
+                      data_uri = f'data:{mime};base64,{b64}'
+                      html = html.replace(f"'{url}'", f"'{data_uri}'")
+                      print(f"  ✓ {key[:50]} ({len(r.content)//1024}kb)")
+                      ok += 1
+                  else:
+                      print(f"  ✗ {key[:50]} — HTTP {r.status_code}")
+                      fail += 1
+              except Exception as e:
+                  print(f"  ✗ {key[:50]} — {e}")
+                  fail += 1
+              time.sleep(0.4)
+
+          with open('index.html', 'w', encoding='utf-8') as f:
+              f.write(html)
+
+          print(f"\nDone: {ok} embedded, {fail} failed")
+          if fail > 0:
+              print("Note: failed images will fall back to showing nothing in lightbox")
+          PYEOF
+
+      - name: Commit embedded HTML
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --staged --quiet || git commit -m "Embed images as base64 [skip ci]"
+          git push
