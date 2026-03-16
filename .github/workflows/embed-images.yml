@@ -22,66 +22,56 @@ jobs:
       - name: Download and embed all images
         run: |
           python3 << 'PYEOF'
-          import requests, base64, re, time, hashlib
+          import requests, base64, re, time
 
           with open('index.html', 'r', encoding='utf-8') as f:
               html = f.read()
 
-          # Find the photos map
-          start = html.find("const photos = {")
-          depth = 0
-          i = start + len("const photos = ")
-          while i < len(html):
-              if html[i] == '{': depth += 1
-              elif html[i] == '}':
-                  depth -= 1
-                  if depth == 0:
-                      end = i + 1
-                      break
-              i += 1
-
-          map_str = html[start:end]
-          pairs = re.findall(r"'([^']+)':\s*'(https://[^']+)'", map_str)
-          print(f"Found {len(pairs)} images to embed")
+          # Find ALL remaining wikimedia URLs (not yet base64)
+          urls = list(set(re.findall(r"'(https://upload\.wikimedia\.org/[^']+)'", html)))
+          print(f"Found {len(urls)} images still needing embedding")
 
           ok, fail = 0, 0
-          for key, url in pairs:
-              # Skip if already base64
-              if url.startswith('data:'):
-                  print(f"  - skip (already embedded): {key[:40]}")
-                  ok += 1
-                  continue
-              try:
-                  r = requests.get(url, timeout=20, headers={
-                      'User-Agent': 'Mozilla/5.0 (compatible; HardkillDB/1.0)'
-                  })
-                  if r.status_code == 200 and len(r.content) > 500:
-                      ext = url.split('.')[-1].lower().split('?')[0]
-                      mime = {
-                          'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-                          'png': 'image/png', 'gif': 'image/gif',
-                          'svg': 'image/svg+xml', 'webp': 'image/webp'
-                      }.get(ext, 'image/jpeg')
-                      b64 = base64.b64encode(r.content).decode()
-                      data_uri = f'data:{mime};base64,{b64}'
-                      html = html.replace(f"'{url}'", f"'{data_uri}'")
-                      print(f"  ✓ {key[:50]} ({len(r.content)//1024}kb)")
-                      ok += 1
-                  else:
-                      print(f"  ✗ {key[:50]} — HTTP {r.status_code}")
-                      fail += 1
-              except Exception as e:
-                  print(f"  ✗ {key[:50]} — {e}")
+          for url in urls:
+              for attempt in range(3):
+                  try:
+                      r = requests.get(url, timeout=30, headers={
+                          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+                      })
+                      if r.status_code == 200 and len(r.content) > 500:
+                          ext = url.split('.')[-1].lower().split('?')[0]
+                          mime = {
+                              'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+                              'png': 'image/png', 'gif': 'image/gif',
+                              'svg': 'image/svg+xml', 'webp': 'image/webp'
+                          }.get(ext, 'image/jpeg')
+                          b64 = base64.b64encode(r.content).decode()
+                          data_uri = f'data:{mime};base64,{b64}'
+                          html = html.replace(f"'{url}'", f"'{data_uri}'")
+                          fname = url.split('/')[-1][:50]
+                          print(f"  ✓ {fname} ({len(r.content)//1024}kb)")
+                          ok += 1
+                          break
+                      else:
+                          print(f"  ? HTTP {r.status_code} for {url.split('/')[-1][:40]} (attempt {attempt+1})")
+                          time.sleep(2)
+                  except Exception as e:
+                      print(f"  ! Error {url.split('/')[-1][:40]}: {e} (attempt {attempt+1})")
+                      time.sleep(2)
+              else:
+                  print(f"  ✗ FAILED after 3 attempts: {url.split('/')[-1][:40]}")
                   fail += 1
-              time.sleep(0.4)
+              time.sleep(0.5)
 
           with open('index.html', 'w', encoding='utf-8') as f:
               f.write(html)
 
-          print(f"\nDone: {ok} embedded, {fail} failed")
-          if fail > 0:
-              print("Note: failed images will fall back to showing nothing in lightbox")
+          remaining = len(re.findall(r"'(https://upload\.wikimedia\.org/[^']+)'", html))
+          print(f"\nDone: {ok} embedded, {fail} failed, {remaining} still external")
           PYEOF
+
+      - name: Show file size
+        run: du -sh index.html
 
       - name: Commit embedded HTML
         run: |
